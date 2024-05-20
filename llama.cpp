@@ -16162,6 +16162,7 @@ static bool llama_control_vector_init(struct llama_control_vector & cvec, const 
     }
 
     // make tensors
+    cvec.tensors.reserve(model.hparams.n_layer);
     cvec.tensors.push_back(nullptr); // there's never a tensor for layer 0
     for (size_t il = 1; il < model.hparams.n_layer; il++) {
         struct ggml_context * ctx = ctx_map.at(model.buft_layer[il].buft);
@@ -16170,6 +16171,8 @@ static bool llama_control_vector_init(struct llama_control_vector & cvec, const 
     }
 
     // allocate tensors / buffers and zero
+    cvec.ctxs.reserve(ctx_map.size());
+    cvec.bufs.reserve(ctx_map.size());
     for (auto it : ctx_map) {
         ggml_backend_buffer_type_t buft = it.first;
         ggml_context * ctx = it.second;
@@ -18074,6 +18077,7 @@ const char * llama_print_system_info(void) {
     s += "AVX512 = "      + std::to_string(ggml_cpu_has_avx512())      + " | ";
     s += "AVX512_VBMI = " + std::to_string(ggml_cpu_has_avx512_vbmi()) + " | ";
     s += "AVX512_VNNI = " + std::to_string(ggml_cpu_has_avx512_vnni()) + " | ";
+    s += "AVX512_BF16 = " + std::to_string(ggml_cpu_has_avx512_bf16()) + " | ";
     s += "FMA = "         + std::to_string(ggml_cpu_has_fma())         + " | ";
     s += "NEON = "        + std::to_string(ggml_cpu_has_neon())        + " | ";
     s += "ARM_FMA = "     + std::to_string(ggml_cpu_has_arm_fma())     + " | ";
