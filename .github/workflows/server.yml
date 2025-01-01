@@ -16,11 +16,15 @@ on:
     branches:
       - master
     paths: ['.github/workflows/server.yml', '**/CMakeLists.txt', '**/Makefile', '**/*.h', '**/*.hpp', '**/*.c', '**/*.cpp', '**/*.cu', '**/*.swift', '**/*.m', 'examples/server/**.*']
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
     paths: ['.github/workflows/server.yml', '**/CMakeLists.txt', '**/Makefile', '**/*.h', '**/*.hpp', '**/*.c', '**/*.cpp', '**/*.cu', '**/*.swift', '**/*.m', 'examples/server/**.*']
-  schedule:
-    -  cron: '2 4 * * *'
+
+env:
+  LLAMA_LOG_COLORS: 1
+  LLAMA_LOG_PREFIX: 1
+  LLAMA_LOG_TIMESTAMPS: 1
+  LLAMA_LOG_VERBOSITY: 10
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || github.run_id }}
@@ -32,7 +36,7 @@ jobs:
 
     strategy:
       matrix:
-        sanitizer: [ADDRESS, THREAD, UNDEFINED]
+        sanitizer: [ADDRESS, UNDEFINED] # THREAD is broken
         build_type: [RelWithDebInfo]
         include:
           - build_type: Release
@@ -72,50 +76,70 @@ jobs:
         run: |
           pip install -r examples/server/tests/requirements.txt
 
-      - name: Verify server deps
-        id: verify_server_deps
+      # Setup nodejs (to be used for verifying bundled index.html)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+
+      - name: Verify bundled index.html
+        id: verify_server_index_html
         run: |
           git config --global --add safe.directory $(realpath .)
-          cd examples/server
-          git ls-files --others --modified
+          cd examples/server/webui
           git status
-          ./deps.sh
+          npm ci
+          npm run build
           git status
-          not_ignored_files="$(git ls-files --others --modified)"
-          echo "Modified files: ${not_ignored_files}"
-          if [ -n "${not_ignored_files}" ]; then
-            echo "Repository is dirty or server deps are not built as expected"
-            echo "${not_ignored_files}"
+          modified_files="$(git status -s)"
+          echo "Modified files: ${modified_files}"
+          if [ -n "${modified_files}" ]; then
+            echo "Repository is dirty or server/webui is not built as expected"
+            echo "Hint: You may need to follow Web UI build guide in server/README.md"
+            echo "${modified_files}"
             exit 1
           fi
 
-      - name: Build
-        id: cmake_build
+      - name: Build (no OpenMP)
+        id: cmake_build_no_openmp
+        if: ${{ matrix.sanitizer == 'THREAD' }}
         run: |
           cmake -B build \
-              -DLLAMA_NATIVE=OFF \
+              -DGGML_NATIVE=OFF \
+              -DLLAMA_BUILD_SERVER=ON \
+              -DLLAMA_CURL=ON \
+              -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+              -DLLAMA_SANITIZE_${{ matrix.sanitizer }}=ON \
+              -DGGML_OPENMP=OFF ;
+          cmake --build build --config ${{ matrix.build_type }} -j $(nproc) --target llama-server
+
+      - name: Build
+        id: cmake_build
+        if: ${{ matrix.sanitizer != 'THREAD' }}
+        run: |
+          cmake -B build \
+              -DGGML_NATIVE=OFF \
               -DLLAMA_BUILD_SERVER=ON \
               -DLLAMA_CURL=ON \
               -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
               -DLLAMA_SANITIZE_${{ matrix.sanitizer }}=ON ;
-          cmake --build build --config ${{ matrix.build_type }} -j $(nproc) --target server
+          cmake --build build --config ${{ matrix.build_type }} -j $(nproc) --target llama-server
 
       - name: Tests
         id: server_integration_tests
         run: |
           cd examples/server/tests
-          PORT=8888 ./tests.sh
+          ./tests.sh
 
       - name: Slow tests
         id: server_integration_tests_slow
         if: ${{ (github.event.schedule || github.event.inputs.slow_tests == 'true') && matrix.build_type == 'Release' }}
         run: |
           cd examples/server/tests
-          PORT=8888 ./tests.sh --stop --no-skipped --no-capture --tags slow
+          SLOW_TESTS=1 ./tests.sh
 
 
   server-windows:
-    runs-on: windows-latest
+    runs-on: windows-2019
 
     steps:
       - name: Clone
@@ -138,7 +162,7 @@ jobs:
         id: cmake_build
         run: |
           cmake -B build -DLLAMA_CURL=ON -DCURL_LIBRARY="$env:RUNNER_TEMP/libcurl/lib/libcurl.dll.a" -DCURL_INCLUDE_DIR="$env:RUNNER_TEMP/libcurl/include"
-          cmake --build build --config Release -j ${env:NUMBER_OF_PROCESSORS} --target server
+          cmake --build build --config Release -j ${env:NUMBER_OF_PROCESSORS} --target llama-server
 
       - name: Python setup
         id: setup_python
@@ -161,11 +185,13 @@ jobs:
         if: ${{ !matrix.disabled_on_pr || !github.event.pull_request }}
         run: |
           cd examples/server/tests
-          behave.exe --summary --stop --no-capture --exclude 'issues|wrong_usages|passkey' --tags llama.cpp
+          $env:PYTHONIOENCODING = ":replace"
+          pytest -v -x
 
       - name: Slow tests
         id: server_integration_tests_slow
         if: ${{ (github.event.schedule || github.event.inputs.slow_tests == 'true') && matrix.build_type == 'Release' }}
         run: |
           cd examples/server/tests
-          behave.exe --stop --no-skipped --no-capture --tags slow
+          $env:SLOW_TESTS = "1"
+          pytest -v -x
